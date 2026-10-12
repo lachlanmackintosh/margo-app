@@ -48,8 +48,8 @@ test('a full selected day hits every target except K2', () => {
   let st = { days: {} };
   for (const meal of ['wake', 'yoghurt', 'egg', 'bowl', 'snacks', 'supps']) st = g.applyFoodActions(st, [{ op: 'add_meal', meal }], DATE).state;
   const day = st.days[DATE];
-  assert.strictEqual(day.sel.yoghurt, 'b_berry');
-  assert.strictEqual(day.sel.egg, 'l_egg');
+  assert.strictEqual(day.sel.yoghurt, 'm1_egg');
+  assert.strictEqual(day.sel.egg, 'm2_berry');
   assert.strictEqual(day.sel.bowl, 'd6'); // Sat 10 Oct = night 6
   const r = g.dayReport(st, DATE);
   const low = r.nutrients.filter(n => n.pct < 100).map(n => n.key);
@@ -73,7 +73,7 @@ test('one option per meal slot, snacks are multi, gaps ranked', () => {
   assert.ok(!has(st.days[DATE], 'kiwi_gold'));
   const r = g.dayReport(st, DATE);
   assert.ok(Array.isArray(r.gaps.ideas));
-  const whey = g.applyFoodActions(st, [{ op: 'add_meal', meal: 'yoghurt' }], DATE).state;
+  const whey = g.applyFoodActions(st, [{ op: 'select_option', option: 'b_berry' }], DATE).state;
   const item = whey.days[DATE].items.find(i => i.id === 'whey');
   const doubled = g.setItemGrams(whey, DATE, item.uid, 90);
   assert.ok(doubled.changed);
@@ -163,7 +163,7 @@ test('old food storage migrates without the dropped foods', () => {
 
 test('service worker cache is the tracker build', () => {
   const sw = fs.readFileSync(path.join(root, 'sw.js'), 'utf8');
-  assert.ok(sw.indexOf("margo-v1") !== -1);
+  assert.ok(sw.indexOf("margo-v2") !== -1);
   assert.ok(sw.indexOf('./food-plan.js') !== -1);
   assert.ok(sw.indexOf('./food-log.js') !== -1);
 });
@@ -218,7 +218,7 @@ test('gap ideas are time-aware, diverse, explained and within upper limits', () 
   // Meal 1 without its whey: protein is short, Meal 2 is next
   const base = g.applyFoodActions({}, [{ op: 'add_meal', meal: 'wake' }, { op: 'add_meal', meal: 'yoghurt' }, { op: 'remove', id: 'whey', meal: 'yoghurt' }], DATE).state;
   const mid = g.dayReport(base, DATE, 11).gaps;
-  assert.ok(/Egg meal/.test(mid.assumed) && mid.assumedSupps);
+  assert.ok(/yoghurt bowl/i.test(mid.assumed) && mid.assumedSupps);
   assert.strictEqual(mid.next, 'egg');
   assert.ok(mid.ideas.length >= 1 && mid.ideas.length <= 3);
   const seen = {};
