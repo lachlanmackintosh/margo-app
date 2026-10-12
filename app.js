@@ -633,7 +633,7 @@ function optMacroLine(o) {
   return `${comma(Math.round(n.kcal))} kcal · ${Math.round(n.protein_g)} g protein`;
 }
 function optRow(o, on, multi) {
-  return `<div class="optrow${on ? ' on' : ''}"><button type="button" class="optmain" data-act="opt-open" data-opt="${esc(o.id)}"><b>${esc(o.name)}</b><span class="muted small">${o.info && OPTS[o.id] && OPTS[o.id].meal === 'supps' ? esc(o.info.dose) : esc(optMacroLine(o))}${o.tags && (o.tags.indexOf('night') === 0 || o.tags === 'Slow cooker') ? ' · ' + esc(o.tags) : ''}</span>${o.info ? `<span class="optinfo">${esc(o.info.timing)}</span>` : ''}</button>
+  return `<div class="optrow${on ? ' on' : ''}"><button type="button" class="optmain" data-act="opt-open" data-opt="${esc(o.id)}"><b>${esc(o.name)}${Array.isArray(o.season) ? ` <span class="seas${inSeason(o, todayStr()) ? ' in' : ''}">(${inSeason(o, todayStr()) ? 'in season' : 'out of season'})</span>` : ''}</b><span class="muted small">${o.info && OPTS[o.id] && OPTS[o.id].meal === 'supps' ? esc(o.info.dose) : esc(optMacroLine(o))}${o.tags && (o.tags.indexOf('night') === 0 || o.tags === 'Slow cooker') ? ' · ' + esc(o.tags) : ''}</span>${o.info ? `<span class="optinfo">${esc(o.info.timing)}</span>` : ''}</button>
     <button type="button" class="optpick${on ? ' on' : ''}" data-act="${on ? 'opt-remove' : 'opt-select'}" data-opt="${esc(o.id)}" aria-label="${on ? 'Remove' : 'Select'} ${esc(o.name)}">${on ? '✓' : (multi ? '+' : '')}</button></div>`;
 }
 function slotCard(day, sl) {
@@ -675,7 +675,7 @@ function logCard(day) {
 function renderMeals(st) {
   const day = normaliseFoodDay(st.days && st.days[todayStr()], st.picks);
   return dashHtml(st) + `<div class="sect">Meals</div>` + (FOOD_PLAN.slots || []).map(sl => slotCard(day, sl)).join('') +
-    multiCard(day, 'Snacks & drinks', FOOD_PLAN.snacks || [], 'Add as many as you have. The first three are the daily drinks.') +
+    multiCard(day, 'Snacks & drinks', snackOrder(FOOD_PLAN.snacks || [], todayStr()), 'Add as many as you have. The first three are the daily drinks.') +
     multiCard(day, 'Supplements', FOOD_PLAN.supplements || [], 'Daily, with Meal 1. Tap for how to take.') + logCard(day) +
     `<details class="card fold" data-keep="rules"><summary>How to eat this</summary><ul class="bul small">${FOOD_PLAN.rules.map(r => `<li>${esc(r)}</li>`).join('')}</ul></details>`;
 }

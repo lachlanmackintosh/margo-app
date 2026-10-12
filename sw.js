@@ -1,5 +1,5 @@
 /* Offline cache for Margo Program */
-const CACHE = 'margo-v2';
+const CACHE = 'margo-v3';
 const FILES = [
  "./",
  "./app.js",
