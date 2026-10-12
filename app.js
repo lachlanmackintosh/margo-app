@@ -1,0 +1,974 @@
+/* Margo Program (glute-priority training + food) — plain JS, no build step. Data in data.js. */
+(() => {
+'use strict';
+const LS = { log: 'margo.log.v1', draft: 'margo.draft.v1', settings: 'margo.settings.v1', timer: 'margo.timer.v1', food: 'margo.food.v2' };
+const DEFAULT_SETTINGS = { start: '2026-10-19', rampEveryBlock: true, deload: false, swaps: {} };
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const load = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k)); return v == null ? d : v; } catch { return d; } };
+const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+const comma = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+function foodState() {
+  let stored = load(LS.food, null);
+  const st = loadFoodState(stored || {});
+  if (!stored || stored.v !== 4) {
+    try {
+      if (stored && !localStorage.getItem('margo.food.v2.bak')) localStorage.setItem('margo.food.v2.bak', JSON.stringify(stored));
+    } catch (e) { /* storage full or blocked */ }
+    saveFood(st);
+  }
+  return st;
+}
+function foodDayCutoff() {
+  const d = today();
+  d.setDate(d.getDate() - 21);
+  return ymd(d);
+}
+function saveFood(st) {
+  const min = foodDayCutoff();
+  const picks = normalisePicks(st && st.picks);
+  const days = {};
+  for (const k of Object.keys((st && st.days) || {})) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(k) && k >= min) days[k] = normaliseFoodDay(st.days[k], picks);
+  }
+  save(LS.food, { v: 4, picks, checks: (st && st.checks) || {}, days });
+}
+
+let settings = Object.assign({}, DEFAULT_SETTINGS, load(LS.settings, {}));
+let log = load(LS.log, []);
+let draft = load(LS.draft, {});
+const ui = { short: false };
+
+/* ---------- dates (local, never UTC) ---------- */
+const pad = n => String(n).padStart(2, '0');
+const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const parseYmd = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d, 12); };
+function today() {
+  const q = new URLSearchParams(location.search).get('today'); // test override, e.g. ?today=2026-10-05
+  if (q && /^\d{4}-\d{2}-\d{2}$/.test(q)) return parseYmd(q);
+  const n = new Date(); return new Date(n.getFullYear(), n.getMonth(), n.getDate(), 12);
+}
+const todayStr = () => ymd(today());
+const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+// Australian style, no commas: "Mon 5 Oct", with year: "Mon 5 Oct 2026" (or '26 when short)
+const fmt = (s, opt = {}) => { const d = parseYmd(s); return `${DAYS[d.getDay()].slice(0, 3)} ${d.getDate()} ${MONTHS[d.getMonth()].slice(0, 3)}${opt.year === 'numeric' ? ' ' + d.getFullYear() : opt.year === '2-digit' ? ' ' + String(d.getFullYear()).slice(2) : ''}`; };
+const fmtLong = d => `${DAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+const dayName = d => DAYS[d.getDay()];
+const daysBetween = (a, b) => Math.round((b - a) / 86400000);
+
+/* ---------- block / phase ---------- */
+const PHASES = {
+  pre: { name: 'Before the block', cls: 'ramp', short: 'Block starts Monday. Full sets from day one.' },
+  normal: { name: 'Normal week', cls: 'normal', short: 'Main lifts 1–2 reps in the tank, shape work 0–1. Add reps first, then weight.' },
+  deload: { name: 'Deload week', cls: 'deload', short: 'Week 5: same exercises, half the sets, 10% lighter. Then a new block.' }
+};
+function blockInfo(d = today()) {
+  const days = daysBetween(parseYmd(settings.start), d);
+  if (days < 0) return { pre: true, daysTo: -days, week: 0, block: 0, phase: settings.deload ? 'deload' : 'pre' };
+  const wi = Math.floor(days / 7), block = Math.floor(wi / 5) + 1, week = (wi % 5) + 1;
+  let phase = week <= 4 ? 'normal' : 'deload';
+  if (settings.deload) phase = 'deload';
+  return { pre: false, week, block, totalWeek: wi + 1, phase };
+}
+
+/* ---------- exercise helpers ---------- */
+const sessionFor = d => WEEK[d.getDay()];
+const isSwapped = ex => !!settings.swaps[ex.id];
+const partsOf = ex => isSwapped(ex) ? ex.swap.parts : ex.parts;
+function target(ex, phase) {
+  const sw = isSwapped(ex) ? ex.swap : {};
+  let sets = sw.sets || ex.sets, min = sw.min || ex.min, max = sw.max || ex.max;
+  const maxTime = ex.maxTime || sw.holdTime;
+  if (phase === 'heavy' && ex.main) { sets = 3; min = 3; max = 6; }
+  if (phase === 'deload') sets = Math.max(1, Math.ceil(sets / 2));
+  const metric = MOV[partsOf(ex)[0]].metric || 'reps';
+  let reps;
+  if (ex.maxTime) reps = 'max time';
+  else if (sw.holdTime) reps = 'hold';
+  else if (metric === 'm') reps = `${max} m`;
+  else reps = min === max ? `${min}` : `${min}–${max}`;
+  if (ex.each && !maxTime) reps += ` ${ex.each}`;
+  return { sets, min, max, reps, maxTime, text: `${sets} × ${reps}` };
+}
+function targetText(t) { // e.g. "3 sets × 8–10 reps", "3 sets × 30 m", "1 set × max time"
+  const sets = `${t.sets} set${t.sets === 1 ? '' : 's'}`;
+  if (t.maxTime || / m$/.test(t.reps)) return `${sets} × ${t.reps}`;
+  const [n, ...rest] = t.reps.split(' ');
+  return `${sets} × ${n} reps${rest.length ? ' ' + rest.join(' ') : ''}`;
+}
+function rowTarget(t) { return t.maxTime ? (t.reps === 'hold' ? 'hold' : 'max time') : t.reps; }
+const restText = s => !s ? 'No rest' : s >= 60 ? (s % 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s / 60} min`) : `${s} s`;
+const ytUrl = name => 'https://www.youtube.com/results?search_query=' + encodeURIComponent(name + ' form').replace(/%20/g, '+');
+const metricOf = m => (MOV[m].metric || 'reps');
+const mvOf = m => MOV[m] || MOB[m];
+const unitLabel = m => ({ reps: 'reps', sec: 'sec', m: 'm' }[metricOf(m)]);
+const kgText = (kg, m) => kg == null || kg === '' ? 'BW' : (MOV[m] && MOV[m].added ? `+${kg}` : `${kg}`);
+const setText = (e) => `${kgText(e.kg, e.m)}${e.kg == null ? '' : ' kg'} × ${e.r ?? '–'}${metricOf(e.m) === 'reps' ? '' : ' ' + unitLabel(e.m)}`;
+
+/* ---------- log ---------- */
+const keyOf = (d, m, s) => `${d}|${m}|${s}`;
+const saveLog = () => save(LS.log, log);
+const findEntry = (d, m, s) => log.find(e => e.d === d && e.m === m && e.s === s);
+function lastTime(m, before) {
+  const prev = log.filter(e => e.m === m && e.d < before);
+  if (!prev.length) return null;
+  const d = prev.reduce((a, e) => e.d > a ? e.d : a, '');
+  return { d, sets: prev.filter(e => e.d === d).sort((a, b) => a.s - b.s) };
+}
+function bestEver(m, before) { // heaviest set (then most reps); longest time for holds. Earlier sessions only.
+  const prev = log.filter(e => e.m === m && e.d < before && e.r != null);
+  if (!prev.length) return null;
+  const timed = metricOf(m) === 'sec';
+  return prev.reduce((best, e) => {
+    const k = e.kg ?? -1, bk = best.kg ?? -1;
+    if (timed) return (e.r > best.r || (e.r === best.r && k > bk)) ? e : best;
+    return (k > bk || (k === bk && e.r > best.r)) ? e : best;
+  });
+}
+const kgLabel = (kg, m) => kg == null || kg === '' ? 'BW' : `${MOV[m] && MOV[m].added ? '+' : ''}${kg} kg`;
+const repLabel = (r, m) => `${r ?? '–'}${metricOf(m) === 'sec' ? ' s' : metricOf(m) === 'm' ? ' m' : ''}`;
+// "60 kg × 10, 10, 9" when every set used the same weight, otherwise "60 kg × 10, 62.5 kg × 8"
+function lastSummary(m, sets) {
+  const same = sets.every(e => (e.kg ?? null) === (sets[0].kg ?? null));
+  if (same) return `${kgLabel(sets[0].kg, m)} × ${sets.map(e => repLabel(e.r, m)).join(', ')}`;
+  return sets.map(e => `${kgLabel(e.kg, m)} × ${repLabel(e.r, m)}`).join(', ');
+}
+function hintFor(m, ex, tgt, last) {
+  const mv = MOV[m], timed = tgt.maxTime || metricOf(m) === 'sec';
+  if (!last) return { cls: 'beat', html: timed ? 'First time: hold as long as you can with good form.' : ex.group === 'explosive' ? 'First time: every rep fast, stop if speed drops.' : 'First time: find a weight you can do with good form.' };
+  if (timed) return { cls: 'beat', html: 'Beat your time' };
+  if (mv.bw && ex.group === 'explosive') return { cls: 'beat', html: 'Every rep fast. Jump further or higher, stop if speed drops.' };
+  const allTop = last.sets.length > 0 && last.sets.every(e => Number(e.r) >= tgt.max);
+  if (allTop) return { cls: 'up', html: `Go up: try ${mv.lower ? '+2.5–5 kg' : '+1–2.5 kg'}` };
+  return { cls: 'beat', html: 'Same weight, beat your reps' };
+}
+
+/* ---------- audio / vibration ---------- */
+let actx = null;
+function unlockAudio() {
+  try {
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === 'suspended') actx.resume();
+    const b = actx.createBuffer(1, 1, 22050), s = actx.createBufferSource(); s.buffer = b; s.connect(actx.destination); s.start(0);
+  } catch (e) { /* no audio */ }
+}
+function beep(freq = 880, dur = 0.18, delay = 0, vol = 0.4) {
+  if (!actx) return;
+  try {
+    const t = actx.currentTime + delay, o = actx.createOscillator(), g = actx.createGain();
+    o.type = 'square'; o.frequency.value = freq; g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur + 0.02);
+  } catch (e) {}
+}
+const buzz = p => { try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) {} };
+function alarm() { beep(988, .2, 0); beep(988, .2, .3); beep(1319, .45, .6); buzz([400, 150, 400, 150, 400]); }
+
+/* ---------- toast ---------- */
+let toastT;
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.remove('hidden'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.add('hidden'), 2200); }
+
+/* ---------- rest timer ---------- */
+let timer = load(LS.timer, null), timerIv = null, restWake = null;
+async function restWakeLock(on) { // keep the screen awake during rest (iOS pauses JS when locked)
+  try { if (on && !restWake && 'wakeLock' in navigator) { restWake = await navigator.wakeLock.request('screen'); restWake.addEventListener('release', () => { restWake = null; }); } else if (!on && restWake) { await restWake.release(); restWake = null; } } catch (e) {}
+}
+function startRest(secs, label) {
+  if (!secs) return;
+  timer = { end: Date.now() + secs * 1000, total: secs, label }; save(LS.timer, timer); runTimer(); restWakeLock(true);
+}
+function stopRest() { restWakeLock(false); timer = null; localStorage.removeItem(LS.timer); clearInterval(timerIv); timerIv = null; $('#timer').classList.add('hidden'); $('#timer').classList.remove('zero'); document.body.classList.remove('timer-on'); }
+function runTimer() {
+  clearInterval(timerIv); if (!timer) return;
+  const el = $('#timer'); el.classList.remove('hidden', 'zero'); document.body.classList.add('timer-on');
+  $('#timer-label').textContent = 'Rest · ' + timer.label; $('#timer-skip').textContent = 'Skip';
+  const tick = () => {
+    const left = Math.max(0, Math.ceil((timer.end - Date.now()) / 1000));
+    $('#timer-time').textContent = `${Math.floor(left / 60)}:${pad(left % 60)}`;
+    $('#timer-fill').style.width = `${Math.min(100, left / timer.total * 100)}%`;
+    if (left <= 3 && left > 0 && timer.lastBeep !== left) { timer.lastBeep = left; beep(660, .08); }
+    if (left === 0) {
+      clearInterval(timerIv); timerIv = null; alarm();
+      el.classList.add('zero'); $('#timer-label').textContent = 'Rest done. Go!'; $('#timer-skip').textContent = 'Close';
+      localStorage.removeItem(LS.timer);
+      setTimeout(() => { if (el.classList.contains('zero')) stopRest(); }, 6000);
+    }
+  };
+  tick(); timerIv = setInterval(tick, 250);
+}
+
+
+/* ---------- views ---------- */
+const view = () => $('#view');
+function phaseChip(bi) { const p = PHASES[bi.phase]; return `<span class="chip ${p.cls}">${p.name}</span>`; }
+function weekLine(bi) {
+  if (bi.pre) return `Block 1 starts ${fmt(settings.start, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })} (in ${bi.daysTo} day${bi.daysTo === 1 ? '' : 's'})`;
+  return `Block ${bi.block} · Week ${bi.week} of 5`;
+}
+function sessionTitle(k) { return k === 'R' ? 'Rest day' : PROGRAM[k].title; }
+function sessionSub(k) { return k === 'R' ? '' : `${PROGRAM[k].day} · ${PROGRAM[k].focus}`; }
+function nextSession(d) { for (let i = 1; i <= 7; i++) { const n = new Date(d); n.setDate(n.getDate() + i); const k = sessionFor(n); if (k !== 'R') return { k, d: n }; } }
+
+function renderHome() {
+  const d = today(), bi = blockInfo(d), k = sessionFor(d), ds = ymd(d);
+  const loggedToday = log.filter(e => e.d === ds);
+  let todayHtml;
+  if (PROGRAM[k]) {
+    const p = PROGRAM[k]; const total = p.exercises.reduce((a, ex) => a + target(ex, bi.phase).sets, 0);
+    const done = p.exercises.reduce((a, ex) => a + countDoneSets(ex, ds, bi.phase), 0);
+    todayHtml = `<div class="muted small">Today</div><h2 style="margin:4px 0 2px">${esc(p.title)}</h2><div class="subt">${esc(sessionSub(k))}</div>
+      <div class="muted small">${p.exercises.length} exercises · about 50–60 min · ${done}/${total} sets done${p.optional ? ' · skip it if you trained 3 days already' : ''}</div>
+      <a class="btn" style="margin-top:14px" href="#/workout/${k}">${done ? 'Continue workout' : 'Start workout'}</a>`;
+  } else {
+    const n = nextSession(d);
+    todayHtml = `<div class="muted small">Today</div><h2 style="margin:4px 0 6px">Rest day</h2>
+      <div class="muted small">Walk 8–10k steps, stretch, sleep 8 hours. Glutes grow while you rest. Next up: <b>${esc(sessionTitle(n.k))}</b> (${esc(PROGRAM[n.k].focus)}) on ${dayName(n.d)}.</div>`;
+  }
+  const n = NUTRITION;
+  const food = foodState();
+  const dash = dayReport(food, ds);
+  const lowNames = dash.lows.slice(0, 3).map(x => x.name);
+  const foodTitle = dash.hasLog ? `${comma(Math.round(dash.macros.kcal))} / ${comma(dash.targets.kcal)} kcal` : 'Nothing logged yet';
+  const foodSub = dash.hasLog
+    ? `${Math.round(dash.macros.p)} / ${dash.targets.protein} g protein${lowNames.length ? ' · Low: ' + lowNames.join(', ') : ' · Food targets covered'}`
+    : 'Pick your meals in the Food tab.';
+  view().innerHTML = `
+  <div class="row between"><div><div class="muted small">${esc(fmtLong(d))}</div><h1 class="apph">${esc(APP_HEADING)}</h1></div>
+    <a class="iconbtn" href="#/settings" aria-label="Settings"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M4 8h16M4 16h16"/><circle cx="9" cy="8" r="2.25"/><circle cx="15" cy="16" r="2.25"/></svg></a></div>
+  <div class="card"><div class="row between wrap"><b>${esc(weekLine(bi))}</b>${phaseChip(bi)}</div>
+    <div class="muted small" style="margin-top:6px">${esc(PHASES[bi.phase].short)}</div></div>
+  <div class="card hero">${todayHtml}</div>
+  <div class="card foodcard"><div class="row between"><b class="kicker">Today's food</b>${dash.hasLog ? `<span class="muted small">${dash.macroBars[1].pct}% protein</span>` : ''}</div>
+    <div class="cardtitle">${esc(foodTitle)}</div>
+    <div class="muted small">${esc(foodSub)}</div>
+    <a class="btn ghost" style="margin-top:10px" href="#/food">Open food</a></div>
+  <div class="card"><div class="row between"><b class="kicker">Daily targets</b><span class="muted small">every day</span></div>
+    <div class="grid4" style="margin-top:10px">
+      <div class="stat"><b>${n.kcal}</b><span>kcal</span></div><div class="stat"><b>${n.protein}</b><span>g protein</span></div>
+      <div class="stat"><b>~${n.carbs}</b><span>g carbs</span></div><div class="stat"><b>~${n.fat}</b><span>g fat</span></div></div>
+    <div class="muted small" style="margin-top:10px">Protein every meal. Sleep 8 hours. 8–10k steps a day.</div></div>
+  <details class="card fold"><summary>Other sessions</summary>
+    <div class="muted small" style="margin-bottom:8px">Missed a session? Don't double up. Do the next one.</div>
+    <div class="grid2">
+      <a class="btn ghost small" href="#/workout/A">Session 1</a><a class="btn ghost small" href="#/workout/B">Session 2</a>
+      <a class="btn ghost small" href="#/workout/C">Session 3</a><a class="btn ghost small" href="#/workout/D">Session 4</a></div></details>
+  ${loggedToday.length ? `<div class="muted small" style="text-align:center">${loggedToday.length} set${loggedToday.length > 1 ? 's' : ''} logged today</div>` : ''}`;
+}
+
+function countDoneSets(ex, ds, phase) {
+  const t = target(ex, phase), parts = partsOf(ex); let c = 0;
+  for (let s = 0; s < t.sets; s++) if (parts.every(m => findEntry(ds, m, s))) c++;
+  return c;
+}
+
+function renderProgram() {
+  const bi = blockInfo();
+  const dayCard = p => `<div class="card"><div class="row between"><div><h3>${esc(p.title)}</h3><div class="subt">${esc(p.day)} · ${esc(p.focus)}</div></div></div>
+    <details class="fold"><summary>${p.exercises.length} exercises, tempo and swaps</summary>
+    ${p.exercises.map(ex => { const t = target(ex, bi.phase); return `<div class="ex-mini"><div class="row between"><div><b>${esc(ex.parts.join(' + '))}</b>${ex.main ? '<span class="badge">Main</span>' : ''}${ex.superset && ex.parts.length > 1 ? '<span class="badge ss">Superset</span>' : ''}</div></div>
+      <div class="small"><span class="target">${esc(targetText(target(Object.assign({}, ex, { id: '_' }), bi.phase)))}</span> · <span class="muted">${ex.rest ? 'rest ' + restText(ex.rest) : 'no rest'}</span></div>
+      <div class="tline">${tempoChips(ex.parts)}</div>
+      <div class="sw">Swap: ${esc(ex.swap.label)} ${tempoChips(ex.swap.parts)}</div></div>`; }).join('')}
+    </details>
+    <a class="btn" style="margin-top:12px" href="#/workout/${p.key}">Open ${esc(p.title)}</a></div>`;
+  view().innerHTML = `<h1>Program</h1>
+  <div class="row between wrap"><span class="muted small">${esc(weekLine(bi))}</span>${phaseChip(bi)}</div>
+  <div class="card"><b>The week</b><ul class="list">${WEEK_TABLE.map(([d, s]) => `<li class="row between"><span>${d}</span><span class="muted">${esc(s)}</span></li>`).join('')}</ul>
+   <div class="muted small">3 days is the core. Session 4 is a bonus glute day. Any 3 non-back-to-back days work.</div></div>
+  <div class="card"><b>Every session (50–60 min)</b><ol class="bul small">
+   <li>Warm-up: 5 min incline walk or bike, then the activation moves</li><li>Main lifts: get stronger here, log every set</li>
+   <li>Shape work: glutes from every angle</li><li>Finisher: pump and core</li></ol>
+   <div class="muted small">Superset = do the two exercises back to back, then rest.</div></div>
+  ${['A', 'B', 'C', 'D'].map(k => dayCard(PROGRAM[k])).join('')}`;
+}
+
+const dur = n => `${Math.floor(n / 60)}:${pad(n % 60)}`;
+/* tempo chips */
+const tchip = k => `<span class="tchip ${TEMPO_INFO[k].cls}">${TEMPO_INFO[k].label}</span>`;
+const tempoChips = parts => [...new Set(parts.map(m => MOV[m].tempo))].map(tchip).join(' ');
+function tempoHtml(parts) {
+  const ts = [...new Set(parts.map(m => MOV[m].tempo))];
+  if (ts.length === 1) return `<div class="tempo">${tchip(ts[0])}<span class="tcue">${esc(TEMPO_INFO[ts[0]].cue)}</span></div>`;
+  return parts.map(m => `<div class="tempo"><span class="tname">${esc(m)}</span>${tchip(MOV[m].tempo)}<span class="tcue">${esc(TEMPO_INFO[MOV[m].tempo].cue)}</span></div>`).join('');
+}
+// Still image shows instantly (and offline); the YouTube player only loads when tapped.
+function demoHtml(m) {
+  const mv = mvOf(m), v = VIDEO[m];
+  const still = mv.img ? `<img src="img/${mv.img}/0.jpg" alt="${esc(m)} still" loading="lazy">`
+    : `<div class="nolink">${esc(m)}<br><small>Video thumbnail needs internet</small></div>${v ? `<img class="thumb" src="https://i.ytimg.com/vi/${v.id}/hqdefault.jpg" alt="${esc(m)} video thumbnail" loading="lazy" onerror="this.remove()">` : ''}`;
+  if (!v) return `<div class="part"><div class="demo">${still}</div><div class="demo-cap"><span>No verified video.</span><a class="yt" href="${ytUrl(m)}" target="_blank" rel="noopener">Search YouTube</a></div><p class="cue">${esc(mv.cue)}</p></div>`;
+  return `<div class="part" data-m="${esc(m)}">
+    <div class="demo vid" data-vid="${v.id}">${still}
+      <button class="play" data-act="play" aria-label="Play demo video: ${esc(m)}"><span class="pbtn">▶</span><span class="ptxt">Play demo${v.secs ? ' · ' + dur(v.secs) : ''}</span></button></div>
+    <div class="demo-cap"><span>${v.note ? `<span class="closest">Closest:</span> ${esc(v.note)}. ` : ''}${esc(v.title)} · <b>${esc(v.ch)}</b></span><a class="yt" href="https://www.youtube.com/watch?v=${v.id}" target="_blank" rel="noopener">YouTube ↗</a></div>
+    <p class="cue">${esc(mv.cue)}</p></div>`;
+}
+function playVideo(btn) {
+  const demo = btn.closest('.demo'), part = btn.closest('.part'), m = part.dataset.m, v = VIDEO[m];
+  if (!navigator.onLine) { toast('Videos need internet. Showing the still image.'); return; }
+  const src = `https://www.youtube-nocookie.com/embed/${v.id}?playsinline=1&autoplay=1&rel=0&modestbranding=1`;
+  demo.classList.add('playing'); part.classList.add('playing');
+  demo.innerHTML = `<iframe src="${src}" title="${esc(m)}: ${esc(v.title)}" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>
+    <button class="closevid" data-act="closevid" aria-label="Close video">✕</button>`;
+}
+function closeVideo(btn) {
+  const part = btn.closest('.part'), tmp = document.createElement('div');
+  tmp.innerHTML = demoHtml(part.dataset.m); part.replaceWith(tmp.firstElementChild);
+}
+
+function exerciseCard(ex, ds, phase, idx) {
+  const t = target(ex, phase), parts = partsOf(ex), sw = isSwapped(ex), two = parts.length > 1;
+  const lasts = parts.map(m => ({ m, last: lastTime(m, ds), best: bestEver(m, ds) }));
+  const lastHtml = lasts.map(({ m, last, best }) => {
+    const h = hintFor(m, ex, t, last);
+    return `<div class="lb">${two ? `<div class="lbname">${esc(m)}</div>` : ''}
+      <div class="lbline"><span class="lbk">Last time</span> ${last ? `<b>${esc(lastSummary(m, last.sets))}</b> <span class="muted">(${esc(fmt(last.d))})</span>` : '<span class="muted">No log yet</span>'}</div>
+      <div class="lbline"><span class="lbk">Best</span> ${best ? `<b>${esc(kgLabel(best.kg, m))} × ${esc(repLabel(best.r, m))}</b> <span class="muted">(${esc(fmt(best.d))})</span>` : '<span class="muted">–</span>'}</div>
+      <div class="hint ${h.cls}">${h.html}</div></div>`;
+  }).join('');
+  let rows = '';
+  for (let s = 0; s < t.sets; s++) {
+    const done = parts.every(m => findEntry(ds, m, s));
+    rows += `<div class="setrow${done ? ' done' : ''}" data-ex="${ex.id}" data-set="${s}"><div class="setno">Set ${s + 1}<small>${esc(rowTarget(t))}</small></div><div class="setin">`;
+    for (const m of parts) {
+      const e = findEntry(ds, m, s), dr = draft[keyOf(ds, m, s)] || {}, lt = lasts.find(x => x.m === m).last;
+      const ls = lt && (lt.sets.find(x => x.s === s) || lt.sets[lt.sets.length - 1]);
+      const kgV = e ? (e.kg ?? '') : (dr.kg ?? ''), rV = e ? (e.r ?? '') : (dr.r ?? '');
+      const kgPh = ls && ls.kg != null ? ls.kg : (MOV[m].bw || MOV[m].added ? 'BW' : '–');
+      const rPh = ls && ls.r != null ? ls.r : (t.maxTime || metricOf(m) === 'sec' ? 'sec' : (metricOf(m) === 'm' ? t.max : t.min));
+      rows += `<div class="pline">${two ? `<div class="plabel">${esc(m)}</div>` : ''}
+        <label class="fld"><input type="number" inputmode="decimal" step="any" min="0" data-m="${esc(m)}" data-f="kg" value="${esc(kgV)}" placeholder="${esc(kgPh)}" aria-label="${esc(m)} set ${s + 1} weight"><span>${MOV[m].added ? '+kg' : 'kg'}</span></label>
+        <label class="fld"><input type="number" inputmode="numeric" step="1" min="0" data-m="${esc(m)}" data-f="r" value="${esc(rV)}" placeholder="${esc(rPh)}" aria-label="${esc(m)} set ${s + 1} ${unitLabel(m)}"><span>${t.maxTime ? 'sec' : unitLabel(m)}</span></label></div>`;
+    }
+    rows += `</div><button class="tick" data-act="tick" aria-label="Mark set ${s + 1} done">✓</button></div>`;
+  }
+  const doneAll = countDoneSets(ex, ds, phase) === t.sets;
+  return `<section class="ex${doneAll ? ' complete' : ''}" id="ex-${ex.id}">
+    <h3>${esc(parts.join(' + '))}${ex.main ? '<span class="badge">Main</span>' : ''}${two ? '<span class="badge ss">Superset</span>' : ''}</h3>
+    ${tempoHtml(parts)}
+    <div class="target big">${esc(targetText(t))}</div>
+    <div class="muted small">${ex.rest ? 'Rest ' + restText(ex.rest) + (two ? ' after both' : '') : 'No rest'}</div>
+    <div class="last">${lastHtml}</div>
+    <div class="sets">${rows}</div>
+    <button class="swap${sw ? ' on' : ''}" data-act="swap" data-ex="${ex.id}">⇄ ${sw ? `Swapped. Tap for original: ${esc(ex.parts.join(' + '))}` : `Swap: ${esc(ex.swap.label)}`}</button>
+    <details class="fold"><summary>Form and demo</summary>
+      <div class="parts${two ? ' two' : ''}">${parts.map(demoHtml).join('')}</div>
+      ${parts.map(m => `<a class="hist-link" href="#/history/${encodeURIComponent(m)}">History: ${esc(m)}</a>`).join('')}
+    </details>
+  </section>`;
+}
+
+function renderWorkout(k) {
+  const p = PROGRAM[k]; if (!p) return go('#/home');
+  const d = today(), ds = ymd(d), bi = blockInfo(d), ph = PHASES[bi.phase];
+  let html = `<div class="topbar"><a class="back" href="#/home" aria-label="Back">‹</a><div style="flex:1"><div class="muted small">${esc(weekLine(bi))}</div><h1 style="font-size:22px;margin:0">${esc(p.title)}</h1><div class="subt">${esc(p.day)} · ${esc(p.focus)}</div></div>${phaseChip(bi)}</div>
+    <div class="note ${ph.cls}"><b>${ph.name}:</b> ${esc(ph.short)}</div>
+    <details class="card fold"><summary>Warm-up</summary><div>5 min incline walk or bike, the activation moves below, then 2 light warm-up sets of your first main lift.</div></details>
+    <label class="toggle card" style="padding:10px 16px"><span><b>Short on time?</b><br><span class="muted small">Activation and the main lifts only</span></span><input type="checkbox" data-act="short" ${ui.short ? 'checked' : ''}></label>`;
+  let lastGroup = '';
+  p.exercises.forEach((ex, i) => {
+    if (ui.short && !(ex.group === 'activation' || ex.group === 'main')) return;
+    if (ex.group !== lastGroup) { html += `<div class="group-h">${GROUP_LABEL[ex.group]}</div>`; lastGroup = ex.group; }
+    html += exerciseCard(ex, ds, bi.phase, i);
+  });
+  html += `<a class="btn" style="margin-top:16px" href="#/home" data-act="finish">Finish session</a>
+    <p class="muted small" style="text-align:center">Every set you tick is saved on this phone straight away.</p>`;
+  view().innerHTML = html;
+  view().dataset.day = k;
+}
+
+/* ---------- HIIT menu ---------- */
+const mins = ph => Math.round(ph.reduce((a, x) => a + x.secs, 0) / 60);
+function hiitPick(d = today()) { // one recommended session each week; deload = Zone 2
+  const bi = blockInfo(d); if (bi.phase === 'deload') return 'z2';
+  return HIIT_ROTATION[(bi.pre ? 0 : bi.totalWeek - 1) % HIIT_ROTATION.length];
+}
+function rotationAhead(d) { const bi = blockInfo(d), w = bi.pre ? 0 : bi.totalWeek - 1; return [1, 2].map(i => HIIT_ROTATION[(w + i) % HIIT_ROTATION.length]); }
+const goalChip = g => `<span class="goal ${GOALS[g].cls}">${GOALS[g].label}</span>`;
+function effortCard() {
+  return `<details class="card fold"><summary>How hard? (RPE out of 10)</summary><table class="effort">${EFFORT.map(([n, l, d]) => `<tr><td class="rpe">${n}</td><td><b>${l}</b><div class="muted small">${esc(d)}</div></td></tr>`).join('')}</table></details>`;
+}
+function renderHIIT() {
+  const d = today(), bi = blockInfo(d), pk = hiitPick(d), o = HIIT[pk], [n1, n2] = rotationAhead(d);
+  view().innerHTML = `<h1>HIIT</h1><div class="subt">Saturday · one session a week. No jogging, ever.</div>
+    <div class="card hero" id="hiit-pick"><div class="muted small">This week's pick</div><h2 style="margin:4px 0 4px">${esc(o.name)}</h2>
+      <div class="row wrap" style="gap:6px">${goalChip(o.goal)}<span class="chip">${mins(o.phases)} min</span></div>
+      <div class="muted small" style="margin-top:6px">${esc(o.desc)}. ${esc(o.equip)}.</div>
+      ${bi.phase === 'deload' ? '<div class="note deload"><b>Deload week:</b> Zone 2 instead of hard intervals.</div>' : HIIT_ALT[pk] ? `<div class="muted small" style="margin-top:6px">Can't do it? Swap for ${esc(HIIT_ALT[pk])}.</div>` : ''}
+      <a class="btn" style="margin-top:12px" href="#/hiit/${pk}">Start ${esc(o.name)}</a>
+      <div class="muted small" style="margin-top:10px">Rotation: ${HIIT_ROTATION.map(k => esc(HIIT[k].name)).join(' → ')}, then repeat. Next week: <b>${esc(HIIT[n1].name)}</b>, then ${esc(HIIT[n2].name)}.</div></div>
+    <div class="note"><b>Recovery days (Tue, Thu, Sun):</b> optional <a href="#/hiit/z2">Zone 2, 30–45 min</a> on the bike or rower. Easy, talk-test pace. Good for aerobic base and HRV.</div>
+    <h2>All sessions</h2>
+    ${Object.keys(HIIT).filter(k => !HIIT[k].hidden).map(k => { const x = HIIT[k]; return `<a class="card hcard${k === pk ? ' pick' : ''}" href="#/hiit/${k}" data-k="${k}">
+      <div class="row between"><b class="hname">${esc(x.name)}</b>${k === pk ? '<span class="badge">This week</span>' : ''}</div>
+      <div class="row wrap" style="gap:6px;margin-top:6px">${goalChip(x.goal)}<span class="chip">${k === 'z2' ? '30–45' : mins(x.phases)} min</span></div>
+      <div class="small" style="margin-top:6px">${esc(x.desc)}</div><div class="muted small">${esc(x.equip)}</div></a>`; }).join('')}
+    ${effortCard()}`;
+}
+function renderHIITSession(key) {
+  const o = HIIT[key]; if (!o) return go('#/hiit');
+  if (!pSet('hiit', key)) { toast('Pause or reset the running timer first'); return go(pHash()); }
+  const bi = blockInfo(), base = o.variantOf || key, B = HIIT[base];
+  view().innerHTML = `<div class="topbar"><a class="back" href="#/hiit" aria-label="Back">‹</a><div style="flex:1"><h1 style="font-size:22px;margin:0">${esc(o.name)}</h1><div class="subt">${esc(o.desc)}</div></div></div>
+    <div class="row wrap" style="gap:6px">${goalChip(o.goal)}<span class="chip" id="hiit-mins">${mins(o.phases)} min</span>${key === hiitPick() ? '<span class="badge" style="margin:0">This week</span>' : ''}</div>
+    <div class="muted small" style="margin-top:6px">${esc(o.equip)}</div>
+    ${bi.phase === 'deload' && o.goal !== 'aero' ? '<div class="note deload"><b>Deload week:</b> do <a href="#/hiit/z2">Zone 2</a> instead.</div>' : ''}
+    ${B.lengths ? `<div class="seg">${Object.entries(B.lengths).map(([k, m]) => `<button data-act="hiit-len" data-v="${k}" class="${k === key ? 'on' : ''}">${m} min</button>`).join('')}</div>` : ''}
+    <div class="hiit-clock" id="hiit-clock"><div class="hiit-phase" id="hiit-phase">Ready</div><div class="hiit-time" id="hiit-time">0:00</div><div class="hiit-sub" id="hiit-sub"></div></div>
+    <div class="grid2"><button class="btn" data-act="hiit-start" id="hiit-start">Start</button><button class="btn ghost" data-act="hiit-reset">Reset</button></div>
+    <button class="btn ghost" style="margin-top:10px" data-act="hiit-skip">Skip to next interval</button>
+    <div class="card"><b>How to</b><ol class="bul small">${o.how.map(x => `<li>${esc(x)}</li>`).join('')}</ol></div>
+    ${o.demos ? `<div class="card"><b>Technique demos</b><div class="parts">${o.demos.map(demoHtml).join('')}</div></div>` : ''}
+    ${effortCard()}
+    <details class="card"><summary><b>Full timer plan</b> <span class="muted small">(${o.phases.length} intervals)</span></summary><ul class="bul small">${o.phases.map((p, i) => `<li id="hp-${i}">${esc(p.label)}${p.round ? ` ${p.round}/${p.of}` : ''}: ${p.secs >= 60 ? (p.secs % 60 ? `${Math.floor(p.secs / 60)} min ${p.secs % 60} s` : p.secs / 60 + ' min') : p.secs + ' s'}</li>`).join('')}</ul></details>`;
+  pPaint();
+}
+
+/* ---------- mobility ---------- */
+const mobKeyFor = d => MOB_ORDER.find(k => MOBILITY[k].day === d.getDay());
+const mobMins = k => Math.round(MOBILITY[k].moves.reduce((a, x) => a + x[1], 0) / 60);
+const moveTime = ([, s, sides]) => `${s >= 60 ? (s % 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s / 60} min`) : `${s} s`}${sides ? ' · both sides' : ''}`;
+function renderMobility() {
+  const d = today(), tk = mobKeyFor(d), mo = MOBILITY[tk];
+  view().innerHTML = `<h1>Mobility</h1><div class="subt">Every day · 15–20 min · follow along</div>
+    <div class="card hero"><div class="muted small">Today · ${DAYS[mo.day]}</div><h2 style="margin:4px 0 2px">${esc(mo.name)}</h2>
+      <div class="muted small">${mobMins(tk)} min · ${mo.moves.length} moves · neck-hump drills included</div>
+      <a class="btn" style="margin-top:12px" href="#/mobility/${tk}">Start ${esc(mo.name)}</a></div>
+    <h2>Pick any session</h2>
+    <div class="card"><ul class="list">${MOB_ORDER.map(k => `<li><a class="item mobitem" href="#/mobility/${k}" data-k="${k}"><span><b>${DAYS[MOBILITY[k].day]}</b><br><span class="muted small">${esc(MOBILITY[k].name)}</span></span><span class="muted small">${mobMins(k)} min ›</span></a></li>`).join('')}</ul></div>
+    <details class="card fold"><summary>Posture cues</summary><ul class="bul small">${AT_CUES.map(c => `<li>${esc(c)}</li>`).join('')}</ul>
+      <div class="muted small">Alexander Technique. Think the cue, don't force it. End every session lying in semi-supine.</div></details>
+    <details class="card fold"><summary>How to</summary><ul class="bul small">
+      <li>Breathe slowly. Ease into each stretch: mild tension, never pain.</li>
+      <li>Gym days: do it after training or in the evening, not right before heavy or explosive work.</li>
+      <li>Through the day: screen at eye level, and a few chin tucks every hour.</li>
+      <li>Progress slowly. Range comes from doing a little most days.</li></ul></details>`;
+}
+function renderMobSession(key) {
+  const mo = MOBILITY[key]; if (!mo) return go('#/mobility');
+  if (!pSet('mob', key)) { toast('Pause or reset the running timer first'); return go(pHash()); }
+  view().innerHTML = `<div class="topbar"><a class="back" href="#/mobility" aria-label="Back">‹</a><div style="flex:1"><h1 style="font-size:22px;margin:0">${esc(DAYS[mo.day])} · ${esc(mo.name)}</h1><div class="subt">${mobMins(key)} min · ${mo.moves.length} moves · follow along</div></div></div>
+    <div class="hiit-clock mobclock" id="hiit-clock"><div class="hiit-phase" id="hiit-phase">Ready</div><div class="hiit-time" id="hiit-time">0:00</div><div class="hiit-sub" id="hiit-sub"></div></div>
+    <div class="grid3"><button class="btn ghost" data-act="mob-prev" aria-label="Previous move">‹ Back</button><button class="btn" data-act="hiit-start" id="hiit-start">Start</button><button class="btn ghost" data-act="hiit-skip" aria-label="Next move">Next ›</button></div>
+    <div class="card mobnow" id="mob-now"></div>
+    <div class="card"><div class="row between"><b>Moves</b><button class="linkbtn" data-act="hiit-reset">Reset</button></div><ol class="moblist">${mo.moves.map((x, i) => `<li id="mp-${i}"><span>${esc(x[0])}${MOB[x[0]].neck ? ' <span class="neck">posture</span>' : ''}</span><span class="muted small">${moveTime(x)}</span></li>`).join('')}</ol></div>`;
+  $('#mob-now').dataset.mi = '';
+  pPaint();
+}
+function mobNowPaint() {
+  const box = $('#mob-now'); if (!box) return;
+  const ph = pPhases(), p = ph[Math.min(P.idx, ph.length - 1)], mi = Math.max(0, p.mi), mv = MOBILITY[P.key].moves[mi], m = mv[0];
+  if (box.dataset.mi !== String(mi)) {
+    box.dataset.mi = String(mi);
+    box.innerHTML = `<div class="muted small">Move ${mi + 1} of ${MOBILITY[P.key].moves.length} · ${esc(moveTime(mv))}</div><h2 class="mobname">${esc(m)}</h2>
+      <div class="parts">${demoHtml(m)}</div>
+      <div class="atcue">${esc(AT_CUES[mi % AT_CUES.length])}</div>`;
+  }
+  MOBILITY[P.key].moves.forEach((_, i) => { const li = $('#mp-' + i); if (li) li.className = i === mi && !P.done ? 'on' : (i < mi || P.done ? 'past' : ''); });
+}
+
+/* ---------- interval player (HIIT + mobility) ---------- */
+const P = { mode: 'hiit', key: 'n44', idx: 0, end: 0, left: null, running: false, iv: null, lastBeep: null, done: false, wake: null };
+const mobCache = {};
+function mobPhases(key) {
+  if (mobCache[key]) return mobCache[key];
+  const p = [{ label: 'Get ready', kind: 'easy', secs: 10, mi: 0 }];
+  MOBILITY[key].moves.forEach(([m, secs, sides], mi) => {
+    if (sides) { const h = Math.round(secs / 2); p.push({ label: m, m, mi, side: 1, kind: 'mob', secs: h }); p.push({ label: m, m, mi, side: 2, kind: 'mob', secs: secs - h }); }
+    else p.push({ label: m, m, mi, kind: 'mob', secs });
+  });
+  return (mobCache[key] = p);
+}
+const pPhases = () => P.mode === 'mob' ? mobPhases(P.key) : HIIT[P.key].phases;
+const pHash = () => P.mode === 'mob' ? '#/mobility/' + P.key : '#/hiit/' + P.key;
+function pSet(mode, key) {
+  if (P.mode === mode && P.key === key) return true;
+  if (P.running) return false;
+  clearInterval(P.iv); wakeLock(false);
+  Object.assign(P, { mode, key, idx: 0, left: null, running: false, done: false, lastBeep: null }); return true;
+}
+function pLeft() { if (P.running) return Math.max(0, (P.end - Date.now()) / 1000); return P.left == null ? pPhases()[P.idx].secs : P.left; }
+async function wakeLock(on) {
+  try { if (on && 'wakeLock' in navigator) P.wake = await navigator.wakeLock.request('screen'); else if (!on && P.wake) { await P.wake.release(); P.wake = null; } } catch (e) {}
+}
+function pStartPause() {
+  unlockAudio();
+  if (P.done) pReset();
+  if (P.running) { P.left = pLeft(); P.running = false; clearInterval(P.iv); wakeLock(false); }
+  else { P.end = Date.now() + pLeft() * 1000; P.left = null; P.running = true; if (P.idx === 0 && pLeft() >= pPhases()[0].secs - 1) beep(1319, .3); P.iv = setInterval(pTick, 200); wakeLock(true); }
+  pPaint();
+}
+function pCue(prev, cur) { // sound + vibration when the interval changes
+  if (P.mode === 'mob') {
+    if (prev && prev.mi === cur.mi && cur.side === 2) { beep(660, .35); buzz(300); }
+    else { beep(1047, .15); beep(1319, .25, .2); buzz([200, 80, 200]); }
+  } else if (cur.kind === 'hard') { beep(1319, .25); beep(1319, .25, .3); buzz([300, 100, 300]); }
+  else { beep(660, .4); buzz(400); }
+}
+function pNext(auto) {
+  const ph = pPhases();
+  if (P.idx >= ph.length - 1) { P.running = false; P.done = true; clearInterval(P.iv); P.left = 0; alarm(); wakeLock(false); pPaint(); return; }
+  const prev = ph[P.idx]; P.idx++; const secs = ph[P.idx].secs;
+  if (P.running) P.end = auto ? P.end + secs * 1000 : Date.now() + secs * 1000; else P.left = secs;
+  pCue(prev, ph[P.idx]); pPaint();
+}
+function pPrev() {
+  const ph = pPhases(); let i = P.idx;
+  if (P.mode === 'mob') { // back = restart this move; tap again within 2 s = previous move
+    const mi = ph[i].mi, first = ph.findIndex(x => x.kind === 'mob' && x.mi === mi), elapsed = ph[i].secs - pLeft();
+    if (ph[i].kind !== 'mob') i = 0;
+    else if (i > first || elapsed > 2) i = first;
+    else i = mi > 0 ? ph.findIndex(x => x.kind === 'mob' && x.mi === mi - 1) : first;
+  } else i = Math.max(0, i - 1);
+  P.idx = i; P.done = false; const secs = ph[i].secs;
+  if (P.running) P.end = Date.now() + secs * 1000; else P.left = secs;
+  pPaint();
+}
+function pTick() {
+  let guard = 0; // catch up if the phone slept through several intervals
+  while (P.running && pLeft() <= 0 && guard++ < 200) pNext(true);
+  if (!P.running) return;
+  const s = Math.ceil(pLeft());
+  if (s <= 3 && s > 0 && P.lastBeep !== `${P.idx}-${s}`) { P.lastBeep = `${P.idx}-${s}`; beep(880, .08); }
+  pPaint();
+}
+function pReset() { clearInterval(P.iv); P.idx = 0; P.left = null; P.running = false; P.done = false; wakeLock(false); pPaint(); }
+function pPaint() {
+  const el = $('#hiit-clock'); if (!el) return;
+  const ph = pPhases(), p = ph[P.idx], s = Math.ceil(pLeft());
+  const remain = s + ph.slice(P.idx + 1).reduce((a, x) => a + x.secs, 0);
+  const active = P.running || P.left != null;
+  el.className = 'hiit-clock' + (P.mode === 'mob' ? ' mobclock' : '') + ' ' + (P.done ? 'rest' : (active ? p.kind : ''));
+  const nx = ph[P.idx + 1];
+  if (P.mode === 'mob') {
+    $('#hiit-phase').textContent = P.done ? 'Done. Nice work!' : p.kind === 'mob' ? `${p.label}${p.side ? ` · side ${p.side} of 2` : ''}` : (active ? 'Get ready' : 'Ready');
+    $('#hiit-sub').textContent = P.done ? 'Finish with a glass of water.' : `Next: ${nx ? (nx.mi === p.mi && nx.side === 2 ? 'switch sides' : nx.label) : 'finish'} · ${Math.floor(remain / 60)}:${pad(remain % 60)} left`;
+  } else {
+    $('#hiit-phase').textContent = P.done ? 'Done. Good work!' : `${p.label}${p.round ? ` · Round ${p.round}/${p.of}` : ''}`;
+    $('#hiit-sub').textContent = P.done ? '' : `Next: ${nx ? nx.label : 'finish'} · ${Math.floor(remain / 60)}:${pad(remain % 60)} left in session`;
+  }
+  $('#hiit-time').textContent = `${Math.floor(s / 60)}:${pad(s % 60)}`;
+  $('#hiit-start').textContent = P.running ? 'Pause' : (P.left != null && !P.done ? 'Resume' : 'Start');
+  if (P.mode === 'mob') mobNowPaint();
+  else ph.forEach((_, i) => { const li = $('#hp-' + i); if (li) li.style.color = i === P.idx && !P.done ? 'var(--accent)' : i < P.idx || P.done ? 'var(--muted)' : ''; });
+}
+
+function renderHistory(m) {
+  if (m) {
+    const entries = log.filter(e => e.m === m);
+    const days = [...new Set(entries.map(e => e.d))].sort().reverse();
+    view().innerHTML = `<div class="topbar"><a class="back" href="#/history" aria-label="Back">‹</a><h1 style="font-size:22px;margin:0">${esc(m)}</h1></div>
+      <div class="card">${days.length ? `<table class="hist"><tbody>${days.map(d => `<tr><td>${esc(fmt(d, { year: 'numeric' }))}</td><td>${entries.filter(e => e.d === d).sort((a, b) => a.s - b.s).map(e => esc(setText(e))).join('<br>')}</td></tr>`).join('')}</tbody></table>` : '<div class="muted">No sets logged yet.</div>'}</div>`;
+    return;
+  }
+  const byM = {};
+  for (const e of log) { if (!byM[e.m] || e.d > byM[e.m]) byM[e.m] = e.d; }
+  const ms = Object.keys(byM).sort((a, b) => byM[b].localeCompare(byM[a]) || a.localeCompare(b));
+  view().innerHTML = `<h1>History</h1>
+    <div class="muted small">${log.length} sets logged · ${new Set(log.map(e => e.d)).size} sessions</div>
+    <div class="card">${ms.length ? `<ul class="list">${ms.map(x => `<li><a class="item" href="#/history/${encodeURIComponent(x)}"><span>${esc(x)}</span><span class="muted small">${esc(fmt(byM[x]))} ›</span></a></li>`).join('')}</ul>` : '<div class="muted">Nothing logged yet. Tick a set in a workout and it shows up here.</div>'}</div>
+    <div class="card"><b>Backup</b><div class="muted small" style="margin:4px 0 10px">Your log lives on this phone only. Export it now and then.</div>
+      <div class="grid2"><button class="btn ghost" data-act="export">Export JSON</button><button class="btn ghost" data-act="import">Import JSON</button></div></div>`;
+}
+
+/* ---------- food ---------- */
+function trackBar(pct, hit) {
+  const w = Math.max(0, Math.min(100, Number(pct) || 0));
+  return `<div class="track${hit ? ' hit' : ''}" role="img" aria-label="${w} percent"><i style="width:${w}%"></i></div>`;
+}
+function ringSvg(pct, r, sw) {
+  const c = 2 * Math.PI * r, off = c * (1 - Math.min(100, Math.max(0, pct)) / 100), box = 2 * (r + sw);
+  return `<svg viewBox="0 0 ${box} ${box}" aria-hidden="true"><circle cx="${box / 2}" cy="${box / 2}" r="${r}" class="rb" stroke-width="${sw}"/><circle cx="${box / 2}" cy="${box / 2}" r="${r}" class="rf" stroke-width="${sw}" stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"/></svg>`;
+}
+function ringHtml(b) {
+  const pct = Math.max(0, Number(b.pct) || 0);
+  const val = b.key === 'kcal' ? comma(Math.round(b.value)) : String(Math.round(b.value));
+  return `<div class="ring${pct >= 100 ? ' hit' : ''}">${ringSvg(pct, 26, 5)}
+    <div class="ring-in"><b>${pct}<small>%</small></b></div><div class="ring-l">${esc(b.name)}</div><div class="ring-v">${val}${b.unit ? ' ' + esc(b.unit) : ''} / ${b.key === 'kcal' ? comma(b.target) : b.target}</div></div>`;
+}
+function microGrid(nuts, short) {
+  const list = nuts.slice().sort((a, b) => a.pct - b.pct || a.name.localeCompare(b.name));
+  return `<div class="mgrid">${list.map(n => {
+    const cls = n.pct >= 100 ? 'hit' : n.hard ? 'hard' : (!short || short[n.key]) ? 'low' : 'plan';
+    return `<div class="mt ${cls}"><div class="mt-h"><span class="mt-n">${esc(n.name)}</span><b>${n.pct}%</b></div>${trackBar(n.pct, n.pct >= 100)}<div class="mt-v">${esc(formatAmount(n.value))} / ${esc(formatAmount(n.target))} ${esc(n.unit)}${n.hard ? ' · known gap' : ''}</div></div>`;
+  }).join('')}</div>`;
+}
+function dashHtml(st) {
+  const d = dayReport(st, todayStr());
+  const kc = d.macroBars[0];
+  const left = Math.round(kc.target - kc.value);
+  const kcLine = !d.hasLog ? 'Pick your meals below' : left >= 0 ? `${comma(left)} kcal to go` : `${comma(-left)} kcal over`;
+  const hit = d.nutrients.filter(n => n.pct >= 100).length;
+  const short = {};
+  for (const x of (d.gaps && d.gaps.gaps) || []) short[x.key] = 1;
+  const lows = d.nutrients.filter(n => short[n.key]).length;
+  const coming = d.nutrients.filter(n => n.pct < 100 && !n.hard && !short[n.key]).length;
+  const est = d.estimate ? '<div class="muted small" style="margin-top:10px">Totals include an estimate.</div>' : '';
+  const hero = `<section class="card hero fhero">
+    <div class="fh-top"><div class="bigring${kc.pct >= 100 ? ' hit' : ''}">${ringSvg(kc.pct, 56, 9)}<div class="bigring-in"><b>${comma(Math.round(kc.value))}</b><span>of ${comma(kc.target)} kcal</span></div></div>
+      <div class="fh-side"><span class="kicker">Today</span><div class="fh-big">${esc(kcLine)}</div>
+        <div class="fh-stat"><b>${hit}</b><span>/ ${d.nutrients.length} micros hit</span></div>
+        <div class="fh-stat"><b>${Math.round(d.macros.p)}</b><span>/ ${d.targets.protein} g protein</span></div></div></div>
+    <div class="rings">${d.macroBars.slice(1).map(ringHtml).join('')}</div>${est}</section>`;
+  const micro = d.hasLog ? `<section class="card mcard"><div class="row between"><b class="kicker">Micronutrients</b><span class="pill${lows ? ' warn' : ' good'}">${lows ? lows + ' short' : coming ? 'On track' : 'All hit'}</span></div>${coming ? `<div class="muted tiny" style="margin-top:6px">Amber = still short after today's plan. The rest are covered by meals still to come.</div>` : ''}${microGrid(d.nutrients, short)}</section>` : '';
+  return hero + gapsHtml(d) + micro;
+}
+function gapsHtml(d) {
+  if (!d.hasLog) return '';
+  const g = d.gaps || { gaps: [], ideas: [] };
+  const ctx = [g.evening ? 'After Meal 3: small snacks and drinks only.' : (g.assumed ? `Counting the plan for meals still to come (${g.assumed}).` : ''), g.assumedSupps ? 'Daily supplements counted.' : ''].filter(Boolean).join(' ');
+  const k2 = `<div class="gfoot">${esc(FOOD_PLAN.hardNotes.K2_ug || '')}</div>`;
+  if (!g.gaps.length) return `<section class="card gaps done"><div class="row between"><b class="kicker">Close the gaps</b><span class="pill good">Nothing needed</span></div>
+    <div class="gdone"><span class="gcheck">✓</span><div><b>You're covered today.</b><div class="muted small">Every target is on track for 100%.${ctx ? ' ' + esc(ctx) : ''}</div></div></div>${k2}</section>`;
+  const chips = g.gaps.slice().sort((a, b) => a.pct - b.pct).map(x => `<span class="gapchip">${esc(x.name)} ${x.pct}%</span>`).join('');
+  const cards = g.ideas.map((i, n) => {
+    const enc = i.items.map(x => x.id + ':' + x.g + ':' + (x.meal || 'snacks')).join(',');
+    return `<div class="sugg"><span class="sugg-n">${n + 1}</span><div class="sugg-t"><b>${esc(i.label)}</b><div class="sugg-why">${esc(i.why || '')}</div><div class="muted tiny">${comma(i.kcal)} kcal${i.closes.length ? ' · closes ' + esc(i.closes.join(', ')) : ''}</div></div><button type="button" class="addbtn" data-act="sugg-add" data-items="${esc(enc)}" data-label="${esc(i.label)}" aria-label="Add ${esc(i.label)}">Add</button></div>`;
+  }).join('');
+  return `<section class="card gaps"><div class="row between"><b class="kicker">Close the gaps</b><span class="muted tiny">${g.gaps.length} short</span></div>${ctx ? `<div class="muted small" style="margin-top:4px">${esc(ctx)}</div>` : ''}
+    <div class="gapchips">${chips}</div>${cards || '<div class="muted small">Nothing on the plan closes these without going over a limit. Fine to leave for today.</div>'}${k2}</section>`;
+}
+function optMacroLine(o) {
+  const n = optionNutrients(o);
+  return `${comma(Math.round(n.kcal))} kcal · ${Math.round(n.protein_g)} g protein`;
+}
+function optRow(o, on, multi) {
+  return `<div class="optrow${on ? ' on' : ''}"><button type="button" class="optmain" data-act="opt-open" data-opt="${esc(o.id)}"><b>${esc(o.name)}</b><span class="muted small">${o.info && OPTS[o.id] && OPTS[o.id].meal === 'supps' ? esc(o.info.dose) : esc(optMacroLine(o))}${o.tags && (o.tags.indexOf('night') === 0 || o.tags === 'Slow cooker') ? ' · ' + esc(o.tags) : ''}</span>${o.info ? `<span class="optinfo">${esc(o.info.timing)}</span>` : ''}</button>
+    <button type="button" class="optpick${on ? ' on' : ''}" data-act="${on ? 'opt-remove' : 'opt-select'}" data-opt="${esc(o.id)}" aria-label="${on ? 'Remove' : 'Select'} ${esc(o.name)}">${on ? '✓' : (multi ? '+' : '')}</button></div>`;
+}
+function slotCard(day, sl) {
+  const sel = day.sel && day.sel[sl.id];
+  const tonight = sl.id === 'bowl' ? defaultOption('bowl', todayStr()) : '';
+  const opts = sl.options.map(o => optRow(o, o.id === sel, false)).join('');
+  const sub = sel ? optionById(sel).name : (tonight ? 'Tonight: ' + optionById(tonight).name : 'Pick one');
+  const extras = day.items.filter(i => i.meal === sl.id && i.extra).map(i => friendlyAmount(i.id, i.g) + ' ' + foodName(i.id).toLowerCase());
+  return `<section class="card slot${sel ? ' picked' : ''}"><div class="slot-h"><div><h3>${esc(sl.label)}</h3><div class="muted tiny">${esc(sl.short)}</div></div><span class="slot-s${sel ? ' on' : ''}">${sel ? '✓ ' : ''}${esc(sub)}</span></div>${extras.length ? `<div class="muted tiny" style="margin-top:6px">Added: ${esc(extras.join(', '))}</div>` : ''}${opts}</section>`;
+}
+function multiCard(day, title, list, sub) {
+  const rows = list.map(o => optRow(o, day.items.some(i => i.opt === o.id), true)).join('');
+  return `<section class="card slot"><div class="slot-h"><div><h3>${esc(title)}</h3><div class="muted tiny">${esc(sub)}</div></div></div>${rows}</section>`;
+}
+function unitOf(id) { return (FOOD_PLAN.library[id] && FOOD_PLAN.library[id].unit) || 'g'; }
+function logCard(day) {
+  if (!day.items.length) return '';
+  const label = it => {
+    if (it.opt && optionById(it.opt)) return optionById(it.opt).name;
+    const sl = (FOOD_PLAN.slots || []).find(s => s.id === it.meal);
+    return sl ? sl.label + (it.extra ? ' · added' : '') : (it.meal === 'snacks' ? 'Snacks' : it.meal === 'supps' ? 'Supplements' : 'Added');
+  };
+  const rows = day.items.map(item => {
+    const name = item.estimate ? item.name : foodName(item.id);
+    const badge = item.estimate ? '<span class="estimate">Estimate</span>' : '';
+    const casual = !item.estimate && CASUAL[item.id] ? ' · ' + friendlyAmount(item.id, item.g) : '';
+    const sub = `<div class="muted small">${esc(label(item) + casual)}</div>`;
+    if (item.flat) {
+      const kcal = item.tot && item.tot.kcal ? Math.round(item.tot.kcal) : 0;
+      return `<div class="irow"><div class="irow-name"><b>${esc(name)}${badge}</b><div class="muted small">About ${comma(kcal)} kcal</div></div><button type="button" class="linkbtn" data-act="log-del" data-uid="${esc(item.uid)}">Remove</button></div>`;
+    }
+    const u = item.estimate ? 'g' : unitOf(item.id);
+    return `<div class="irow"><div class="irow-name"><b>${esc(name)}${badge}</b>${sub}</div>
+      <label class="gramlab"><input class="gram" type="number" inputmode="decimal" min="0.1" max="2500" step="any" data-grams="${esc(item.uid)}" value="${item.g}" aria-label="${esc(name)} amount"><span>${esc(u)}</span></label>
+      <button type="button" class="linkbtn" data-act="log-del" data-uid="${esc(item.uid)}">Remove</button></div>`;
+  }).join('');
+  return `<details class="card fold" data-keep="log"><summary>Today's log (${day.items.length} foods)</summary><div class="muted small">Everything selected today. Edit amounts in grams here.</div>${rows}</details>`;
+}
+function renderMeals(st) {
+  const day = normaliseFoodDay(st.days && st.days[todayStr()], st.picks);
+  return dashHtml(st) + `<div class="sect">Meals</div>` + (FOOD_PLAN.slots || []).map(sl => slotCard(day, sl)).join('') +
+    multiCard(day, 'Snacks & drinks', FOOD_PLAN.snacks || [], 'Add as many as you have. The first three are the daily drinks.') +
+    multiCard(day, 'Supplements', FOOD_PLAN.supplements || [], 'Daily, with Meal 1. Tap for how to take.') + logCard(day) +
+    `<details class="card fold" data-keep="rules"><summary>How to eat this</summary><ul class="bul small">${FOOD_PLAN.rules.map(r => `<li>${esc(r)}</li>`).join('')}</ul></details>`;
+}
+function infoHtml(info) {
+  if (!info) return '';
+  const rows = [['Dose', info.dose], ['When', info.timing], ['How', info.how], ['Limit', info.limit], ['Storage', info.store]].filter(r => r[1]);
+  return `<h3>How to take it</h3><div class="infobox">${rows.map(([k, v]) => `<div class="inforow"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}${info.alt ? `<div class="infoalt">${esc(info.alt)}</div>` : ''}</div>`;
+}
+function showSheet(html, label) {
+  let el = document.getElementById('sheet');
+  if (!el) { el = document.createElement('div'); el.id = 'sheet'; el.className = 'sheet-wrap hidden'; document.body.appendChild(el); }
+  el.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(label)}"><div class="grab"></div>${html}</div>`;
+  clearTimeout(sheetTimer);
+  el.classList.remove('hidden');
+  el.querySelector('.sheet').scrollTop = 0;
+  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('open')));
+  document.body.classList.add('sheet-on');
+}
+function openFoodRules() {
+  sheetOpt = 'rules';
+  const groups = (FOOD_PLAN.foodRules || []).map(g => `<div class="rgroup"><h3>${esc(g.title)}</h3><ul class="rlist">${g.items.map(t => {
+    const k = t.indexOf(': ');
+    return `<li>${k > 0 && k < 40 ? `<b>${esc(t.slice(0, k))}</b> ${esc(t.slice(k + 2))}` : esc(t)}</li>`;
+  }).join('')}</ul></div>`).join('');
+  showSheet(`<div class="row between"><span class="kicker">Food</span><button type="button" class="linkbtn" data-act="sheet-close">Close</button></div>
+    <h2 class="sheet-t">Food rules</h2><div class="muted small">Buy, prep, store and limits. Not absolute: weigh benefit vs risk.</div>${groups}`, 'Food rules');
+}
+let sheetOpt = '';
+let sheetTimer = 0;
+function openSheet(optId) {
+  const o = optionById(optId);
+  if (!o) return;
+  sheetOpt = optId;
+  const hit = OPTS[optId];
+  const st = foodState();
+  const day = normaliseFoodDay(st.days && st.days[todayStr()], st.picks);
+  const on = hit.meal === 'snacks' || hit.meal === 'supps' ? day.items.some(i => i.opt === optId) : (day.sel && day.sel[hit.meal]) === optId;
+  const n = optionNutrients(o);
+  const T = FOOD_PLAN.targets;
+  const macros = [['kcal', 'Calories', n.kcal, T.kcal, ''], ['p', 'Protein', n.protein_g, T.protein, 'g'], ['c', 'Carbs', n.carbs_g, T.carbs, 'g'], ['f', 'Fat', n.fat_g, T.fat, 'g'], ['fib', 'Fibre', n.fibre_g, T.fibre, 'g']]
+    .map(([key, name, value, target, unit]) => ringHtml({ key, name, value, target, unit, pct: nutrientPct(value, target) })).join('');
+  const nuts = FOOD_PLAN.nutrients.map(x => ({ key: x.key, name: x.name, unit: x.unit, hard: x.hard, value: n[x.key] || 0, target: FOOD_PLAN.sillz[x.key], pct: nutrientPct(n[x.key] || 0, FOOD_PLAN.sillz[x.key]) }));
+  const ings = o.items.map(it => `<div class="irow"><div class="irow-name">${esc(foodName(it.id))}</div><span class="amt">${esc(friendlyAmount(it.id, it.g))}</span></div>`).join('');
+  const slotLabel = hit.meal === 'snacks' ? 'Snacks & drinks' : hit.meal === 'supps' ? 'Supplements' : slotById(hit.meal).label;
+  const supp = hit.meal === 'supps';
+  showSheet(`<div class="row between"><span class="kicker">${esc(slotLabel)}</span><button type="button" class="linkbtn" data-act="sheet-close">Close</button></div>
+    <h2 class="sheet-t">${esc(o.name)}</h2>
+    ${supp ? `<div class="muted small">${esc(o.method || '')}</div>${infoHtml(o.info)}` : `<div class="muted small">${comma(Math.round(n.kcal))} kcal · P ${Math.round(n.protein_g)} g · C ${Math.round(n.carbs_g)} g · F ${Math.round(n.fat_g)} g</div>
+    <div class="rings five">${macros}</div>${infoHtml(o.info)}
+    <h3>Ingredients</h3>${ings}
+    <h3>How to prepare</h3><p class="small method">${esc(o.method || '')}</p>`}
+    <h3>Micronutrients <span class="muted tiny">% of daily target</span></h3>${microGrid(nuts)}
+    <button type="button" class="btn sheetbtn" data-act="${on ? 'opt-remove' : 'opt-select'}" data-opt="${esc(optId)}" data-close="1">${on ? 'Remove from today' : 'Select'}</button>`, o.name);
+}
+function closeSheet() {
+  sheetOpt = '';
+  const el = document.getElementById('sheet');
+  if (el) {
+    el.classList.remove('open');
+    clearTimeout(sheetTimer);
+    sheetTimer = setTimeout(() => el.classList.add('hidden'), 260);
+  }
+  document.body.classList.remove('sheet-on');
+}
+let paintingMeals = false;
+function paintMealChecks() {
+  paintingMeals = true;
+  document.querySelectorAll('input[data-meal]').forEach(el => {
+    el.indeterminate = el.dataset.state === 'part';
+    el.checked = el.dataset.state === 'on';
+  });
+  paintingMeals = false;
+}
+function renderFood() {
+  const st = foodState();
+  view().innerHTML = `<div class="row between"><h1>Food</h1><button type="button" class="rulesbtn" data-act="food-rules">Rules</button></div>
+    <div class="muted small">Morning snack, then Meals 1, 2 and 3. Today against your targets.</div>
+    ${renderMeals(st)}`;
+  paintMealChecks();
+}
+
+function foodArg() {
+  return (location.hash.replace(/^#\/?/, '').split('/')[1]) || '';
+}
+
+function renderRules() {
+  view().innerHTML = `<h1>The Rules</h1>
+  <details class="card fold" open><summary>Glutes first</summary><ul class="bul">
+    <li>Glutes 3 times a week: heavy (Mon), light pump (Wed), lower body (Fri), plus the bonus day.</li>
+    <li>Squeeze at the top of every rep. If you feel it in your lower back, lighten it and tuck your ribs.</li>
+    <li>Hip thrusts, hinges (RDL), lunges/step-ups and abduction every week: they build the glute from every angle.</li></ul></details>
+  <details class="card fold"><summary>Effort</summary><ul class="bul">
+    <li><b>RIR</b> (reps in reserve) = how many more good reps you could have done.</li>
+    <li>Main lifts: stop with 1–2 left. Shape work: 0–1 left, it should burn.</li>
+    <li>Form before weight. Always.</li></ul></details>
+  <details class="card fold"><summary>Tempo</summary><ul class="list">${Object.keys(TEMPO_INFO).map(k => `<li>${tchip(k)}<div class="small" style="margin-top:6px">${esc(TEMPO_INFO[k].cue)}</div></li>`).join('')}</ul></details>
+  <details class="card fold"><summary>Week 1: find your weights</summary><ul class="bul">
+    <li>Pick weights you could do <b>2–3 more reps</b> with. Log them.</li>
+    <li>From week 2, push closer and start adding reps.</li></ul></details>
+  <details class="card fold"><summary>Going up (progressive overload)</summary><ul class="bul">
+    <li><b>Add reps first.</b> For 3 × 8–12: 8, 8, 8 → 10, 9, 9 → 12, 12, 12.</li>
+    <li><b>Then add weight</b> once every set hits the top of the range with good form.</li>
+    <li>Upper body: <b>+1–2 kg</b>. Hip thrust, RDL, squat: <b>+2.5–5 kg</b>.</li>
+    <li>The app shows a "Go up" tip when you're ready.</li></ul></details>
+  <details class="card fold"><summary>Blocks and deload</summary><ul class="bul">
+    <li>4 weeks of the same workouts, then week 5 is a <b>deload</b>: half the sets, 10% lighter. The app does it automatically.</li>
+    <li>Also deload early if lifts go backwards twice, joints ache, or you feel flat for a week (Settings → Deload week).</li></ul></details>
+  <details class="card fold"><summary>Missed or busy days</summary><ul class="bul">
+    <li>Missed a session? Don't double up. Do the next one.</li>
+    <li>Short on time? Activation + the main lifts + abduction.</li></ul></details>
+  <details class="card fold"><summary>Habits</summary><ul class="bul">
+    <li>About ${NUTRITION.protein} g protein and ${comma(NUTRITION.kcal)} kcal a day. Glutes need food to grow, so don't under-eat.</li>
+    <li>8–10k steps a day. Incline walking is the cardio.</li>
+    <li>Sleep 8 hours. Photos and measurements every 4 weeks.</li></ul></details>`;
+}
+
+function renderSettings() {
+  const bi = blockInfo();
+  view().innerHTML = `<div class="topbar"><a class="back" href="#/home" aria-label="Back">‹</a><h1 style="font-size:22px;margin:0">Settings</h1></div>
+  <div class="card"><label><b>Block start date</b><div class="muted small" style="margin:2px 0 8px">Week 1 starts on this day. Pick a Monday.</div>
+    <input type="date" id="set-start" value="${esc(settings.start)}"></label>
+    <div class="muted small" style="margin-top:8px">Now: ${esc(weekLine(bi))} · ${PHASES[bi.phase].name}</div></div>
+  <div class="card">
+    <label class="toggle"><span><b>Deload week</b><br><span class="muted small">Half the sets, same weights or 10% lighter. Turn off when you're back to normal.</span></span><input type="checkbox" id="set-deload" ${settings.deload ? 'checked' : ''}></label></div>
+  <div class="card"><b>Backup</b><div class="grid2" style="margin-top:10px"><button class="btn ghost" data-act="export">Export JSON</button><button class="btn ghost" data-act="import">Import JSON</button></div>
+    <div class="muted small" style="margin-top:8px">${log.length} sets stored on this phone. Import merges with what's here.</div></div>
+  <div class="card small muted">Exercise images: <a href="https://github.com/yuhonas/free-exercise-db" target="_blank" rel="noopener">free-exercise-db</a> (public domain). Demo videos: YouTube, credited to each channel. Works offline once installed: Safari → Share → Add to Home Screen.</div>`;
+  $('#set-start').addEventListener('change', e => { if (e.target.value) { settings.start = e.target.value; save(LS.settings, settings); renderSettings(); toast('Start date saved'); } });
+  $('#set-deload').addEventListener('change', e => { settings.deload = e.target.checked; save(LS.settings, settings); renderSettings(); toast(settings.deload ? 'Deload week on' : 'Deload week off'); });
+}
+
+/* ---------- export / import ---------- */
+function exportLog() {
+  const data = { app: 'margo-training', version: 1, exported: new Date().toISOString(), settings, log };
+  const name = `margo-training-log-${todayStr()}.json`;
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const file = typeof File === 'function' ? new File([blob], name, { type: 'application/json' }) : null;
+  if (file && navigator.canShare && navigator.canShare({ files: [file] })) { navigator.share({ files: [file], title: name }).catch(() => {}); return; }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); toast('Log exported');
+}
+function importLog() {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'application/json,.json';
+  inp.onchange = async () => {
+    try {
+      const data = JSON.parse(await inp.files[0].text());
+      const incoming = Array.isArray(data) ? data : data.log;
+      if (!Array.isArray(incoming)) throw new Error('bad file');
+      const map = new Map(log.map(e => [keyOf(e.d, e.m, e.s), e])); let added = 0;
+      for (const e of incoming) { if (!e || !e.d || !e.m || typeof e.s !== 'number') continue; const k = keyOf(e.d, e.m, e.s); if (!map.has(k)) added++; map.set(k, e); }
+      log = [...map.values()]; saveLog();
+      if (data.settings && data.settings.start) { settings = Object.assign({}, DEFAULT_SETTINGS, data.settings); save(LS.settings, settings); }
+      toast(`Imported: ${added} new set${added === 1 ? '' : 's'}`); route();
+    } catch (err) { toast('Could not read that file'); }
+  };
+  inp.click();
+}
+
+/* ---------- food refresh ---------- */
+function refreshFoodViews() {
+  const open = [];
+  document.querySelectorAll('details[data-keep]').forEach(d => { if (d.open) open.push(d.dataset.keep); });
+  const h = location.hash.replace(/^#\/?/, '') || 'home';
+  const [p, arg] = h.split('/');
+  const y = scrollY;
+  if (p === 'food') renderFood(arg || '');
+  else if (p === 'home' || p === '') renderHome();
+  document.querySelectorAll('details[data-keep]').forEach(d => { if (open.indexOf(d.dataset.keep) !== -1) d.open = true; });
+  scrollTo(0, y);
+}
+
+/* ---------- events ---------- */
+document.addEventListener('input', e => {
+  const t = e.target; if (!t.dataset || !t.dataset.f) return;
+  const row = t.closest('.setrow'); const ds = todayStr(), s = Number(row.dataset.set), m = t.dataset.m;
+  const k = keyOf(ds, m, s); draft[k] = Object.assign({}, draft[k], { [t.dataset.f]: t.value }); save(LS.draft, draft);
+  const ent = findEntry(ds, m, s); // editing an already-ticked set updates the log
+  if (ent) { const v = t.value === '' ? null : Number(t.value); ent[t.dataset.f === 'kg' ? 'kg' : 'r'] = v; saveLog(); }
+});
+document.addEventListener('change', e => {
+  if (e.target.dataset && e.target.dataset.act === 'short') { ui.short = e.target.checked; renderWorkout(view().dataset.day); }
+  if (paintingMeals) return;
+  if (e.target.dataset && e.target.dataset.meal) {
+    const op = e.target.dataset.state === 'on' ? 'clear_meal' : 'add_meal';
+    const applied = applyFoodActions(foodState(), [{ op, meal: e.target.dataset.meal }], todayStr());
+    if (applied.changed) saveFood(applied.state);
+    refreshFoodViews();
+  }
+  if (e.target.dataset && e.target.dataset.mush != null) {
+    const applied = applyFoodActions(foodState(), [{ op: 'set_mushrooms', on: e.target.checked }], todayStr());
+    if (applied.changed) saveFood(applied.state);
+    refreshFoodViews();
+  }
+  if (e.target.dataset && e.target.dataset.swap) {
+    const applied = applyFoodActions(foodState(), [{ op: 'set_swap', slot: e.target.dataset.swap, id: e.target.value }], todayStr());
+    if (applied.changed) saveFood(applied.state);
+    refreshFoodViews();
+  }
+  if (e.target.dataset && e.target.dataset.grams) {
+    const g = Math.round(Number(e.target.value) * 10) / 10;
+    if (!g || g <= 0 || g > 2500) { refreshFoodViews(); return; }
+    const res = setItemGrams(foodState(), todayStr(), e.target.dataset.grams, g);
+    if (res.changed) { saveFood(res.state); refreshFoodViews(); }
+  }
+});
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  const act = b.dataset.act;
+  if (act === 'tick') {
+    unlockAudio();
+    const row = b.closest('.setrow'), ex = Object.values(PROGRAM).flatMap(p => p.exercises).find(x => x.id === row.dataset.ex);
+    const ds = todayStr(), s = Number(row.dataset.set), parts = partsOf(ex), bi = blockInfo();
+    if (row.classList.contains('done')) {
+      log = log.filter(x => !(x.d === ds && x.s === s && parts.includes(x.m))); saveLog(); row.classList.remove('done');
+      $('#ex-' + ex.id).classList.remove('complete'); return;
+    }
+    for (const inp of row.querySelectorAll('input[data-f]')) if (inp.value === '' && inp.placeholder && !isNaN(Number(inp.placeholder))) inp.value = inp.placeholder;
+    for (const m of parts) {
+      const kgI = row.querySelector(`input[data-m="${CSS.escape(m)}"][data-f="kg"]`), rI = row.querySelector(`input[data-m="${CSS.escape(m)}"][data-f="r"]`);
+      const entry = { d: ds, m, s, kg: kgI.value === '' ? null : Number(kgI.value), r: rI.value === '' ? null : Number(rI.value), day: view().dataset.day, ph: bi.phase, t: Date.now() };
+      log = log.filter(x => !(x.d === ds && x.m === m && x.s === s)); log.push(entry);
+    }
+    saveLog(); row.classList.add('done');
+    if (countDoneSets(ex, ds, bi.phase) === target(ex, bi.phase).sets) $('#ex-' + ex.id).classList.add('complete');
+    startRest(ex.rest, parts.join(' + '));
+  } else if (act === 'swap') {
+    const id = b.dataset.ex; settings.swaps[id] = !settings.swaps[id]; if (!settings.swaps[id]) delete settings.swaps[id]; save(LS.settings, settings);
+    const y = scrollY; renderWorkout(view().dataset.day); scrollTo(0, y);
+  } else if (act === 'play') playVideo(b);
+  else if (act === 'closevid') closeVideo(b);
+  else if (act === 'timer-skip') stopRest();
+  else if (act === 'timer-add') { if (timer) { timer.end += Number(b.dataset.v) * 1000; timer.total = Math.max(timer.total, (timer.end - Date.now()) / 1000); save(LS.timer, timer); runTimer(); } }
+  else if (act === 'hiit-len') { if (P.running) return toast('Pause or reset first'); go('#/hiit/' + b.dataset.v); }
+  else if (act === 'hiit-start') pStartPause();
+  else if (act === 'hiit-reset') pReset();
+  else if (act === 'hiit-skip') { unlockAudio(); pNext(false); }
+  else if (act === 'mob-prev') { unlockAudio(); pPrev(); }
+  else if (act === 'opt-open') openSheet(b.dataset.opt);
+  else if (act === 'sheet-close') closeSheet();
+  else if (act === 'food-rules') openFoodRules();
+  else if (act === 'opt-select' || act === 'opt-remove') {
+    const op = act === 'opt-select' ? 'select_option' : 'unselect_option';
+    const applied = applyFoodActions(foodState(), [{ op, option: b.dataset.opt }], todayStr());
+    if (applied.changed) { saveFood(applied.state); toast(applied.changes[0]); }
+    if (b.dataset.close) closeSheet();
+    refreshFoodViews();
+  }
+  else if (act === 'sugg-add') {
+    const acts = String(b.dataset.items || '').split(',').map(x => x.split(':')).filter(x => x.length >= 2).map(([id, g, meal]) => ({ op: 'add_more', id, grams: Number(g), meal: meal || 'snacks' }));
+    const applied = applyFoodActions(foodState(), acts, todayStr());
+    if (applied.changed) { saveFood(applied.state); toast('Added ' + (b.dataset.label || '')); }
+    refreshFoodViews();
+  }
+  else if (act === 'log-add') {
+    const applied = applyFoodActions(foodState(), [{ op: 'add', id: b.dataset.id, meal: b.dataset.meal }], todayStr());
+    if (applied.changed) saveFood(applied.state);
+    refreshFoodViews();
+  } else if (act === 'log-del') {
+    const applied = applyFoodActions(foodState(), [{ op: 'remove', uid: b.dataset.uid }], todayStr());
+    if (applied.changed) { saveFood(applied.state); toast('Removed'); }
+    refreshFoodViews();
+  } else if (act === 'export') exportLog();
+  else if (act === 'import') importLog();
+  else if (act === 'finish') { const n = log.filter(x => x.d === todayStr()).length; toast(n ? `Session saved: ${n} sets. Be better, not perfect.` : 'No sets ticked today'); }
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && sheetOpt) { closeSheet(); return; }
+});
+document.addEventListener('click', e => { if (e.target && e.target.id === 'sheet') closeSheet(); });
+/* ---------- router ---------- */
+function go(h) { location.hash = h; }
+function route() {
+  const h = location.hash.replace(/^#\/?/, '') || 'home', [p, arg] = h.split('/');
+  const tab = { home: 'home', workout: 'home', settings: 'home', program: 'program', food: 'food', history: 'history', rules: 'rules' }[p] || 'home';
+  document.querySelectorAll('.tabs a').forEach(a => a.classList.toggle('on', a.dataset.tab === tab));
+  if (p === 'workout') renderWorkout(arg);
+  else if (p === 'program') renderProgram();
+  else if (p === 'food') renderFood(arg);
+  else if (p === 'history') renderHistory(arg ? decodeURIComponent(arg) : null);
+  else if (p === 'rules') renderRules();
+  else if (p === 'settings') renderSettings();
+  else renderHome();
+  if (p !== 'workout' || !route.keep) scrollTo(0, 0);
+}
+window.addEventListener('hashchange', route);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && timer && timerIv) runTimer(); });
+route();
+if (timer && timer.end > Date.now()) runTimer(); else if (timer) { timer = null; localStorage.removeItem(LS.timer); }
+
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  // When a new version's service worker takes over, reload once so the new files are used straight away.
+  const hadController = !!navigator.serviceWorker.controller; let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded) { reloaded = true; location.reload(); } });
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+})();
