@@ -558,3 +558,5 @@ body.sheet-on{overflow:hidden}
 body{background:radial-gradient(120% 45% at 50% -12%, rgba(232,180,200,.35), transparent 55%),radial-gradient(90% 40% at 100% 0%, rgba(190,160,225,.25), transparent 60%),var(--bg)}
 .card{box-shadow:0 1px 2px rgba(90,60,110,.05),0 8px 24px rgba(90,60,110,.06)}
 .btn:not(.ghost){background:linear-gradient(135deg,#b48ad8,#e3a5c1);color:#fff;border-color:transparent}
+
+.seas{font-weight:400;font-size:.78em;opacity:.55}.seas.in{opacity:.9;color:#3a9a6a}
