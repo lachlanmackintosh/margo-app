@@ -101,8 +101,258 @@ const WEEK_TABLE = [
 const NUTRITION = (typeof FOOD_PLAN !== 'undefined' && FOOD_PLAN.targets) ? FOOD_PLAN.targets : { kcal: 2000, protein: 95, carbs: 200, fat: 75 };
 const GROUP_LABEL = { activation: 'Activation: wake the glutes up', main: 'Main lifts: get stronger here', muscle: 'Shape work', finisher: 'Finisher: pump + core' };
 
-/* No demo videos yet (none verified). The still image + cue shows each move. */
-const VIDEO = {};
+/* Demo videos (13 Oct 2026): female demonstrators, IDs verified via YouTube oEmbed + thumbnail check. Tap to play (youtube-nocookie, playsinline). */
+const VIDEO = {
+ "Banded glute bridge": {
+  "id": "KiUmVd2Q4Ds",
+  "title": "Mini Band Glute Bridge Tutorial | How To Do a Glute Bridge",
+  "ch": "Lift With Michelle - Exercise Form Tutorials",
+  "secs": 89
+ },
+ "Frog pump": {
+  "id": "jgVf97hVv4Y",
+  "title": "How to Frog Pump for glute activation and booty gains!",
+  "ch": "Ebuni Louise",
+  "secs": 57
+ },
+ "Banded lateral walk": {
+  "id": "PhNkkOieB-8",
+  "title": "Lateral Band Walk",
+  "ch": "Women's Strength Nation by Holly Perkins",
+  "secs": 34
+ },
+ "Banded clamshell": {
+  "id": "K9qytmsQVu0",
+  "title": "Hip Exercise | Improve your clamshell with Dr. Kasia",
+  "ch": "Focus Physical Therapy",
+  "secs": 117
+ },
+ "Barbell hip thrust": {
+  "id": "Zp26q4BY5HE",
+  "title": "How To Do a Barbell Hip Thrust",
+  "ch": "Girls Gone Strong | Women's Health & Fitness",
+  "secs": 88
+ },
+ "Smith machine hip thrust": {
+  "id": "s3N-i46gR8o",
+  "title": "How To: Hip Thrust on Smith Machine",
+  "ch": "Courtneyofitness",
+  "secs": 146
+ },
+ "Romanian deadlift": {
+  "id": "fKWeeTI8jlQ",
+  "title": "How to Romanian Deadlift Properly (Avoid Back Pain)",
+  "ch": "Sharelle Grant",
+  "secs": 486
+ },
+ "DB Romanian deadlift": {
+  "id": "ndfZi5fDaVM",
+  "title": "Dumbbell RDL | Romanian Deadlift Tutorial",
+  "ch": "Lift With Michelle - Exercise Form Tutorials",
+  "secs": 116
+ },
+ "Smith machine squat": {
+  "id": "m3tEG33Tdk4",
+  "title": "Smith Machine Squat",
+  "ch": "Women's Strength Nation by Holly Perkins",
+  "secs": 53
+ },
+ "Leg press (feet high & wide)": {
+  "id": "UT1U-iGl2Uc",
+  "title": "High Wide Stance Leg Press",
+  "ch": "Deanna Lorea",
+  "secs": 28
+ },
+ "B-stance hip thrust": {
+  "id": "9rDq2uQdau0",
+  "title": "Learning the B-Stance Hip Thrust",
+  "ch": "SoheeFit",
+  "secs": 151
+ },
+ "Single-leg hip thrust": {
+  "id": "VNUgUwNhcjw",
+  "title": "Single-leg hip thrust Dumbbell",
+  "ch": "Anne Craig",
+  "secs": 17
+ },
+ "Sumo deadlift": {
+  "id": "GavYxz6FOUw",
+  "title": "Dumbbell Sumo Deadlift Exercise Tutorial | Dumbbell Deadlift",
+  "ch": "Lift With Michelle - Exercise Form Tutorials",
+  "secs": 106,
+  "note": "dumbbell version"
+ },
+ "Good morning": {
+  "id": "8Tp_Hx1jdSc",
+  "title": "HOW TO DO A GOOD MORNING | Smith Machine Basics",
+  "ch": "Naomi Kong",
+  "secs": 278,
+  "note": "Smith machine version"
+ },
+ "Paused hip thrust": {
+  "id": "Bqthk0y_8tU",
+  "title": "BB Hip Thrust Pause/Hold",
+  "ch": "Denvyr | Tall Girl Nutritionist",
+  "secs": 19
+ },
+ "Bulgarian split squat": {
+  "id": "vgn7bSXkgkA",
+  "title": "How to do a Bulgarian Split Squat / Proper Setup",
+  "ch": "Denvyr | Tall Girl Nutritionist",
+  "secs": 31
+ },
+ "DB reverse lunge": {
+  "id": "MyqQRJ2lW7Q",
+  "title": "Dumbbell Reverse Lunges (Tutorial + Tips) | Team Evolve",
+  "ch": "Vivian Ngo",
+  "secs": 97
+ },
+ "DB step-up": {
+  "id": "nE9Yh1JuCuo",
+  "title": "Dumbbell Single Leg Step Up Form | How To Do a Step Up",
+  "ch": "Lift With Michelle - Exercise Form Tutorials",
+  "secs": 120
+ },
+ "B-stance DB RDL": {
+  "id": "KoXAfvFB-YY",
+  "title": "B-stance Dumbbell RDL",
+  "ch": "Carly Gregson",
+  "secs": 32
+ },
+ "Seated hip abduction": {
+  "id": "Nw09BzZPyVs",
+  "title": "HOW TO USE THE SEATED ABDUCTION MACHINE | Coach Kelly Cues",
+  "ch": "Kelly Matthews",
+  "secs": 196
+ },
+ "Banded seated abduction": {
+  "id": "FvuCVHD6Ing",
+  "title": "Band Abduction",
+  "ch": "Women's Strength Nation by Holly Perkins",
+  "secs": 38
+ },
+ "Cable kickback": {
+  "id": "8UzzL5thzRg",
+  "title": "Glute | Cable Kickback | Do's and Don'ts",
+  "ch": "Cheyenne Trevatt",
+  "secs": 131
+ },
+ "Glute kickback machine": {
+  "id": "t216WJhIWfc",
+  "title": "Short Girl Gym Hack: Glute Kickback Machine",
+  "ch": "Funsized",
+  "secs": 26
+ },
+ "45° glute hyperextension": {
+  "id": "G6HG5VzJoNc",
+  "title": "Form Tips: How to perform a back extension | Glute Bias 45° Extension Form Tips",
+  "ch": "Alexandra Yaeger",
+  "secs": 75
+ },
+ "Cable pull-through": {
+  "id": "IU-ERkjTKXA",
+  "title": "How to properly perform cable pull through",
+  "ch": "Mia Dales",
+  "secs": 78
+ },
+ "Lying leg curl": {
+  "id": "nWcdlwXzLHI",
+  "title": "HOW TO LYING LEG CURL | Coach Kelly Cues",
+  "ch": "Kelly Matthews",
+  "secs": 134
+ },
+ "Seated leg curl": {
+  "id": "8xXTKdc03Yk",
+  "title": "HOW TO SEATED LEG CURL | Coach Kelly Cues",
+  "ch": "Kelly Matthews",
+  "secs": 168
+ },
+ "Lat pulldown": {
+  "id": "AtcrCtnah98",
+  "title": "Lat Pulldown",
+  "ch": "Girls Gone Strong | Women's Health & Fitness",
+  "secs": 41
+ },
+ "Assisted pull-up": {
+  "id": "lGCl8kVa6-c",
+  "title": "Beginner Guide To The Assisted Pull Up Machine!",
+  "ch": "Laci Renee ",
+  "secs": 90
+ },
+ "Seated DB shoulder press": {
+  "id": "xg-7dS8ZGKE",
+  "title": "Seated Dumbbell Overhead Press",
+  "ch": "Women's Strength Nation by Holly Perkins",
+  "secs": 37
+ },
+ "Arnold press": {
+  "id": "7a57Gvlv_5Q",
+  "title": "Arnold Press",
+  "ch": "Women's Strength Nation by Holly Perkins",
+  "secs": 53
+ },
+ "Seated cable row": {
+  "id": "uZ0r6iYcLwo",
+  "title": "Seated Cable Row",
+  "ch": "Women's Strength Nation by Holly Perkins",
+  "secs": 29
+ },
+ "Chest-supported DB row": {
+  "id": "mHBOUz9KY9A",
+  "title": "Chest Supported Row - How To Do A Chest Supported Row With Dumbbells",
+  "ch": "Girls Gone Strong | Women's Health & Fitness",
+  "secs": 88
+ },
+ "DB lateral raise": {
+  "id": "DmYr7yuF3z0",
+  "title": "HOW TO: Lateral Raise with Dumbbell for women",
+  "ch": "Isadora Gama",
+  "secs": 133
+ },
+ "Cable lateral raise": {
+  "id": "TjRPxzbz23U",
+  "title": "Cable Lateral Raise",
+  "ch": "Girls Gone Strong | Women's Health & Fitness",
+  "secs": 9
+ },
+ "Face pull": {
+  "id": "CQ2drP5NX28",
+  "title": "Face Pull",
+  "ch": "Girls Gone Strong | Women's Health & Fitness",
+  "secs": 74
+ },
+ "Band pull-apart": {
+  "id": "KaquqW2LISc",
+  "title": "Band Pull Apart - Modern Woman's Guide to Strength Training",
+  "ch": "Girls Gone Strong | Women's Health & Fitness",
+  "secs": 66
+ },
+ "Incline push-up": {
+  "id": "PdW0wx8sFjY",
+  "title": "Incline Push-Up",
+  "ch": "Girls Gone Strong | Women's Health & Fitness",
+  "secs": 71
+ },
+ "DB bench press": {
+  "id": "U2wKgoUAEMo",
+  "title": "Dumbbell Bench Press - Modern Woman's Guide to Strength Training",
+  "ch": "Girls Gone Strong | Women's Health & Fitness",
+  "secs": 66
+ },
+ "Dead bug": {
+  "id": "vuumFHsrGlo",
+  "title": "Dead Bug Arms Only | Beginner Core Exercise Tutorial",
+  "ch": "Lift With Michelle - Exercise Form Tutorials",
+  "secs": 135,
+  "note": "arms-only beginner version"
+ },
+ "Plank": {
+  "id": "u6ZelKyUM6g",
+  "title": "How to Plank | The Right Way | Well+Good",
+  "ch": "Well+Good",
+  "secs": 63
+ }
+};
 const APP_HEADING = 'Margo Program';
 
 const TEMPO_INFO = {
