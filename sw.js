@@ -1,10 +1,11 @@
 /* Offline cache for Margo Program */
-const CACHE = 'margo-v9-units';
+const CACHE = 'margo-v10-eatout';
 const FILES = [
  "./",
  "./app.js",
  "./data.js",
  "./food-log.js",
+ "./eatout.js",
  "./food-plan.js",
  "./index.html",
  "./manifest.webmanifest",
